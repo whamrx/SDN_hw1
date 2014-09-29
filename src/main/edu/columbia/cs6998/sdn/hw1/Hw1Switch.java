@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.floodlightcontroller.core.FloodlightContext;
@@ -77,15 +78,20 @@ public class Hw1Switch
     
 /* CS6998: data structures for the learning switch feature
     // Stores the learned state for each switch
-    protected Map<IOFSwitch, Map<Long, Short>> macToSwitchPortMap;
 */
+    protected Map<IOFSwitch, Map<Long, Short>> macToSwitchPortMap;
 
-/* CS6998: data structures for the firewall feature
+/* CS6998: data structures for the firewall feature*/
     // Stores the MAC address of hosts to block: <Macaddr, blockedTime>
     protected Map<Long, Long> blacklist;
 
-    ...more
-*/
+    // Stores the connection map for destinations limitation
+    protected Map<Long, Set<Long>> destinationMap = Collections.synchronizedMap(new HashMap<Long, Set<Long>>());
+
+    // Stores the Elephant flow number and source for each switch
+    protected Map<IOFSwitch, Integer> elephantCountMap;
+    protected Map<IOFSwitch, Map<Long, Set<Long>>> elephantFlowsMap;
+
 
     // flow-mod - for use in the cookie
     public static final int HW1_SWITCH_APP_ID = 10;
@@ -132,31 +138,29 @@ public class Hw1Switch
      * @param mac The MAC address of the host to add
      * @param portVal The switchport that the host is on
      */
-/* CS6998: fill out the following ????s
+/* CS6998: fill out the following ????s */
     protected void addToPortMap(IOFSwitch sw, long mac, short portVal) {
-        Map<Long, Short> swMap = ????;
+        Map<Long, Short> swMap = macToSwitchPortMap.get(sw);
         
         if (swMap == null) {
             // May be accessed by REST API so we need to make it thread safe
             swMap = Collections.synchronizedMap(new LRULinkedHashMap<Long, Short>(MAX_MACS_PER_SWITCH));
-            macToSwitchPortMap.put(????);
+            macToSwitchPortMap.put(sw, swMap);
         }
-        swMap.put(????);
+        swMap.put(mac, portVal);
     }
-*/
     
     /**
      * Removes a host from the MAC->SwitchPort mapping
      * @param sw The switch to remove the mapping from
      * @param mac The MAC address of the host to remove
      */
-/* CS6998: fill out the following ????s
+/* CS6998: fill out the following ????s*/
     protected void removeFromPortMap(IOFSwitch sw, long mac) {
-        Map<Long, Short> swMap = macToSwitchPortMap.????
+        Map<Long, Short> swMap = macToSwitchPortMap.get(sw);
         if (swMap != null)
-            ????
+            macToSwitchPortMap.remove(swMap);
     }
-*/
 
     /**
      * Get the port that a MAC is associated with
@@ -164,15 +168,84 @@ public class Hw1Switch
      * @param mac The MAC address to get
      * @return The port the host is on
      */
-/* CS6998: fill out the following method
+/* CS6998: fill out the following method*/
     public Short getFromPortMap(IOFSwitch sw, long mac) {
-        ....
+        if(macToSwitchPortMap.get(sw) != null){
+	    return macToSwitchPortMap.get(sw).get(mac);
+	 }
+	
+	return null;
     }
-*/
+
+    /*
+    * here we handle some basic operation for destination limitation
+    */
+    protected void addToDestinationMap(long sourceMac, long DestMac) {
+        Set<Long> sourceMap = destinationMap.get(sourceMac);
+        
+        if (sourceMap == null) {
+            // May be accessed by REST API so we need to make it thread safe
+            sourceMap = Collections.synchronizedSet(new HashSet<Long>());
+            destinationMap.put(sourceMac, sourceMap);
+        }
+        sourceMap.add(DestMac);
+    }
     
+    protected void removeFromDestinationMap(long mac) {
+        Set<Long> sourceMap = destinationMap.get(mac);
+        if (sourceMap != null)
+            destinationMap.remove(mac);
+    }
+
+    protected int getSizeFromDestinationMap(long mac) {
+        Set<Long> sourceMap = destinationMap.get(mac);
+        if (sourceMap != null)
+	    return sourceMap.size();
+
+	return 0;
+    }
+
+    protected void addToElephantCountMap(IOFSwitch sw) {
+	if(elephantCountMap.containsKey(sw))
+	    elephantCountMap.put(sw, elephantCountMap.get(sw) + 1);
+	else
+	    elephantCountMap.put(sw, 0);
+    }
+
+    protected void addToElephantFlowsMap(IOFSwitch sw, long sourceMac, long destMac) {
+	Map<Long, Set<Long>> flowsMap = elephantFlowsMap.get(sw);
+	if(flowsMap == null) {
+		flowsMap = Collections.synchronizedMap(new HashMap<Long, Set<Long>>());
+		elephantFlowsMap.put(sw, flowsMap);
+	}
+	Set<Long> destSet = flowsMap.get(sourceMac);
+	if(destSet == null) {
+		destSet = Collections.synchronizedSet(new HashSet<Long>());
+		flowsMap.put(sourceMac, destSet);
+	}
+	destSet.add(destMac);
+    }
+
+    protected boolean checkElephantFlowsMap(IOFSwitch sw, long sourceMac, long destMac) {
+	Map<Long, Set<Long>> flowsMap = elephantFlowsMap.get(sw);
+	if(flowsMap == null)
+	    return false;
+	Set<Long> destSet = flowsMap.get(sourceMac);
+	if(destSet == null)
+	    return false;
+	return destSet.contains(destMac);
+    }
+
+    protected void blockElephantSource(IOFSwitch sw) {
+	Map<Long, Set<Long>> flowsMap = elephantFlowsMap.get(sw);
+	if(flowsMap == null)
+	    return;
+	for(Long sourceMac : flowsMap.keySet())
+	    blacklist.put(sourceMac, System.currentTimeMillis());
+    }
     /**
      * Writes a OFFlowMod to a switch.
-     * @param sw The switch tow rite the flowmod to.
+     * @param sw The switch to write the flowmod to.
      * @param command The FlowMod actions (add, delete, etc).
      * @param bufferId The buffer ID if the switch has buffered the packet.
      * @param match The OFMatch structure to write.
@@ -308,32 +381,47 @@ public class Hw1Switch
 /* CS6998: Do works here to learn the port for this MAC
         ....
 */
-
-/* CS6998: Do works here to implement super firewall
-        Hint: You may check connection limitation here.
-        ....
-*/
+	short inPort = pi.getInPort();
+	Short mappedInPort = getFromPortMap(sw, sourceMac);
+	if(mappedInPort == null || !mappedInPort.equals(inPort))
+	    addToPortMap(sw, sourceMac, inPort);
 
 /* CS6998: Filter-out hosts in blacklist
  *         Also, when the host is in blacklist check if the blockout time is
  *         expired and handle properly
-        if (....)
-            return Command.CONTINUE;
-*/
+*/        
+	if (blacklist.containsKey(sourceMac)) {
+		if(System.currentTimeMillis() - blacklist.get(sourceMac) > FIREWALL_BLOCK_TIME_DUR) {
+			blacklist.remove(sourceMac);
+		} else 
+            		return Command.CONTINUE;
+	}
 
-/* CS6998: Ask the switch to flood the packet to all of its ports
- *         Thus, this module currently works as a dummy hub
- */
-        this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_FLOOD.getValue());
+/* CS6998: Do works here to implement super firewall
+        Hint: You may check connection limitation here.
+*/
+	if(destMac < 100) {
+		addToDestinationMap(sourceMac, destMac);
+		if(getSizeFromDestinationMap(sourceMac) > MAX_DESTINATION_NUMBER) {
+		    log.info("I block you " + sourceMac + "!!!!");
+		    blacklist.put(sourceMac, System.currentTimeMillis());
+		    removeFromDestinationMap(sourceMac);
+            	    return Command.CONTINUE;
+		}
+	}
+
+	log.info("Mac address " + sourceMac + " Currently has " + getSizeFromDestinationMap(sourceMac) + " connections");
 
 /* CS6998: Ask the switch to flood the packet to all of its ports
         // Now output flow-mod and/or packet
         // CS6998: Fill out the following ???? to obtain outPort
-        Short outPort = ....;
+*/
+        Short outPort = getFromPortMap(sw,destMac);
         if (outPort == null) {
             // If we haven't learned the port for the dest MAC, flood it
             // CS6998: Fill out the following ????
-            this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_????.getValue());
+            this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_FLOOD.getValue());
+	    log.info(sw + " have to flood the packet from " + sourceMac);
         } else if (outPort == match.getInputPort()) {
             log.trace("ignoring packet that arrived on same port as learned destination:"
                     + " switch {} dest MAC {} port {}",
@@ -346,9 +434,10 @@ public class Hw1Switch
                     & ~OFMatch.OFPFW_DL_SRC & ~OFMatch.OFPFW_DL_DST
                     & ~OFMatch.OFPFW_NW_SRC_MASK & ~OFMatch.OFPFW_NW_DST_MASK);
             // CS6998: Fill out the following ????
-            this.writeFlowMod(sw, OFFlowMod.OFPFC_ADD, pi.getBufferId(), match, ????);
+            this.writeFlowMod(sw, OFFlowMod.OFPFC_ADD, pi.getBufferId(), match, outPort);
+	    log.info("We get a learned port!!!!!!" + outPort);
         }
-*/
+
         return Command.CONTINUE;
     }
 
@@ -358,7 +447,7 @@ public class Hw1Switch
      * @param flowRemovedMessage The flow removed message.
      * @return Whether to continue processing this message or stop.
      */
-/*    private Command processFlowRemovedMessage(IOFSwitch sw, OFFlowRemoved flowRemovedMessage) {
+     private Command processFlowRemovedMessage(IOFSwitch sw, OFFlowRemoved flowRemovedMessage) {
         if (flowRemovedMessage.getCookie() != Hw1Switch.HW1_SWITCH_COOKIE) {
             return Command.CONTINUE;
         }
@@ -374,10 +463,26 @@ public class Hw1Switch
         //  Hint: You may detect Elephant Flow here.
         //  ....
         //
+	double duration = flowRemovedMessage.getDurationSeconds() + (double)flowRemovedMessage.getDurationNanoseconds()/1000000000;
+	double bandwidth = flowRemovedMessage.getByteCount() / duration;
+	if(bandwidth > ELEPHANT_FLOW_BAND_WIDTH) {
+		if(!checkElephantFlowsMap(sw, sourceMac, destMac)) {
+			addToElephantCountMap(sw);
+			addToElephantFlowsMap(sw, sourceMac, destMac);
+			if(elephantCountMap.get(sw) > MAX_ELEPHANT_FLOW_NUMBER) {
+			    	log.info(sw +" block all elephant source!!");
+				blockElephantSource(sw);
+				elephantCountMap.remove(sw);
+				elephantFlowsMap.remove(sw);
+			}
+		}    
+	}
+	log.info("This flow has size: " + flowRemovedMessage.getByteCount() + " with Duration " + flowRemovedMessage.getDurationSeconds() + "s, and " + flowRemovedMessage.getDurationNanoseconds() + "ns");
+	log.info("This switch " + sw + " has " + elephantCountMap.get(sw) + " elephant flows");
         
         return Command.CONTINUE;
     }
-*/
+
     // IOFMessageListener
     
     @Override
@@ -385,10 +490,8 @@ public class Hw1Switch
         switch (msg.getType()) {
             case PACKET_IN:
                 return this.processPacketInMessage(sw, (OFPacketIn) msg, cntx);
-            /*
             case FLOW_REMOVED:
                 return this.processFlowRemovedMessage(sw, (OFFlowRemoved) msg);
-            */
             case ERROR:
                 log.info("received an error {} from switch {}", (OFError) msg, sw);
                 return Command.CONTINUE;
@@ -443,17 +546,20 @@ public class Hw1Switch
         floodlightProvider =
                 context.getServiceImpl(IFloodlightProviderService.class);
 /* CS6998: Initialize data structures
+*/
         macToSwitchPortMap = 
                 new ConcurrentHashMap<IOFSwitch, Map<Long, Short>>();
         blacklist =
-                new HashMap<Long, Long>();
-*/
+                new ConcurrentHashMap<Long, Long>();
+	destinationMap = new ConcurrentHashMap<Long, Set<Long>>();
+	elephantCountMap = new ConcurrentHashMap<IOFSwitch, Integer> ();
+	elephantFlowsMap = new ConcurrentHashMap<IOFSwitch, Map<Long, Set<Long>>>();
     }
 
     @Override
     public void startUp(FloodlightModuleContext context) {
         floodlightProvider.addOFMessageListener(OFType.PACKET_IN, this);
-        //floodlightProvider.addOFMessageListener(OFType.FLOW_REMOVED, this);
+        floodlightProvider.addOFMessageListener(OFType.FLOW_REMOVED, this);
         floodlightProvider.addOFMessageListener(OFType.ERROR, this);
     }
 }
